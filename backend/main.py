@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import re
+import threading
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import anthropic
@@ -22,7 +24,32 @@ from heuristic import predict_heuristic
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Mindmap API", version="1.0.0")
+
+def _preload_tribe_background() -> None:
+    """Load TRIBE weights once when the container starts so /predict skips model init."""
+    if os.environ.get("MINDMAP_SKIP_TRIBE_PRELOAD", "").lower() in ("1", "true", "yes"):
+        logger.info("TRIBE startup preload disabled (MINDMAP_SKIP_TRIBE_PRELOAD)")
+        return
+
+    def _run() -> None:
+        try:
+            from tribe_runner import get_tribe_model
+
+            get_tribe_model()
+            logger.info("TRIBE model preloaded at startup")
+        except Exception as e:
+            logger.warning("TRIBE preload failed; first /predict will load lazily: %s", e)
+
+    threading.Thread(target=_run, daemon=True, name="mindmap-tribe-preload").start()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _preload_tribe_background()
+    yield
+
+
+app = FastAPI(title="Mindmap API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

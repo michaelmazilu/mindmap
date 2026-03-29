@@ -11,11 +11,17 @@ Requires Modal secret `mindmap-secrets` with at least:
 First deploy creates volume `mindmap-tribe-cache` for model + HF caches.
 """
 
+import os
+
 import modal
 
 app = modal.App("mindmap-backend")
 
 tribe_volume = modal.Volume.from_name("mindmap-tribe-cache", create_if_missing=True)
+
+# 0 = scale to zero when idle (cheapest; first request after idle pays cold start + model load).
+# 1 = keep one GPU container warm 24/7 (much lower p95 latency, ~continuous GPU billing).
+_MIN_CONTAINERS = int(os.environ.get("MINDMAP_MODAL_MIN_CONTAINERS", "0"))
 
 # TRIBE v2: install CUDA PyTorch first, then the repo, then force GPU torch again.
 image = (
@@ -65,7 +71,9 @@ image = (
     cpu=4,
     memory=24576,
     timeout=900,
-    scaledown_window=60 * 20,
+    # Stay warm longer so casual scrolling hits a loaded container (saves cold GPU spin-up).
+    scaledown_window=60 * 45,
+    min_containers=_MIN_CONTAINERS,
 )
 @modal.asgi_app()
 def fastapi_app():
