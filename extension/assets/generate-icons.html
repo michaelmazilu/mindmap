@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head><title>Mindmap Icon Generator</title></head>
+<body>
+<p>Open this file in a browser and right-click each canvas to save as PNG.</p>
+<canvas id="c16" width="16" height="16"></canvas>
+<canvas id="c48" width="48" height="48"></canvas>
+<canvas id="c128" width="128" height="128"></canvas>
+<script>
+function drawIcon(canvas) {
+  const s = canvas.width;
+  const ctx = canvas.getContext('2d');
+  
+  ctx.fillStyle = '#08080a';
+  ctx.fillRect(0, 0, s, s);
+  
+  const cx = s * 0.48, cy = s * 0.5, r = s * 0.35;
+  
+  const grad = ctx.createRadialGradient(cx, cy, r * 0.1, cx, cy, r);
+  grad.addColorStop(0, '#ffdd00');
+  grad.addColorStop(0.4, '#ff4500');
+  grad.addColorStop(0.7, '#8b0000');
+  grad.addColorStop(1, '#2a2a2a');
+  
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, r, r * 0.8, 0, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  
+  if (s >= 48) {
+    ctx.strokeStyle = 'rgba(255,80,0,0.3)';
+    ctx.lineWidth = s * 0.01;
+    for (let i = 0; i < 5; i++) {
+      const x = cx + (Math.random() - 0.5) * r * 1.4;
+      const y = cy + (Math.random() - 0.5) * r * 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x - r * 0.15, y);
+      ctx.quadraticCurveTo(x, y - r * 0.1, x + r * 0.15, y);
+      ctx.stroke();
+    }
+  }
+  
+  ctx.strokeStyle = 'rgba(255,80,0,0.4)';
+  ctx.lineWidth = Math.max(1, s * 0.015);
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, r, r * 0.8, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+drawIcon(document.getElementById('c16'));
+drawIcon(document.getElementById('c48'));
+drawIcon(document.getElementById('c128'));
+
+[16, 48, 128].forEach(size => {
+  const canvas = document.getElementById('c' + size);
+  const link = document.createElement('a');
+  link.download = 'icon' + size + '.png';
+  link.href = canvas.toDataURL('image/png');
+  link.textContent = ' Download icon' + size + '.png ';
+  document.body.appendChild(link);
+});
+</script>
+</body>
+</html>

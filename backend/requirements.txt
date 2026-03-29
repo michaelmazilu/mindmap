@@ -1,0 +1,9 @@
+fastapi[standard]>=0.115.0
+anthropic>=0.42.0
+numpy>=1.26.0
+upstash-redis>=1.1.0
+# Production TRIBE v2 pipeline (uncomment when ready):
+# edge-tts>=6.1.0
+# soundfile>=0.12.0
+# nibabel>=5.2.0
+# torch>=2.0.0
