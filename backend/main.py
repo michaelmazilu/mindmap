@@ -33,7 +33,9 @@ app.add_middleware(
 cache = ActivationCache()
 claude_client: Optional[anthropic.Anthropic] = None
 
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+# Sonnet 4 IDs often 400 if your key/tier does not include them — 3.5 Sonnet is widely enabled.
+# Override on Modal: modal secret create ... or env ANTHROPIC_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
 
 # __TWEET_BODY__ replaced with json.dumps(tweet) so braces in tweets cannot break the prompt.
 CLAUDE_PROMPT_TEMPLATE = """You are a neuroscience prediction engine. Analyze this tweet and predict which brain regions would activate most strongly when reading it. Return ONLY valid JSON, no other text.
@@ -195,18 +197,43 @@ async def predict(req: PredictRequest):
         json.dumps(text, ensure_ascii=False),
     )
 
-    try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
+    fallback_model = "claude-3-5-sonnet-20241022"
+
+    def _create(model_id: str):
+        return client.messages.create(
+            model=model_id,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
+
+    try:
+        response = _create(ANTHROPIC_MODEL)
     except anthropic.APIStatusError as e:
-        logger.exception("Anthropic API error")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Anthropic API error: {e.status_code} {e.message}",
-        ) from e
+        if (
+            e.status_code == 400
+            and ANTHROPIC_MODEL != fallback_model
+            and fallback_model
+        ):
+            logger.warning(
+                "Anthropic 400 for model=%s (%s); retrying %s",
+                ANTHROPIC_MODEL,
+                getattr(e, "message", e),
+                fallback_model,
+            )
+            try:
+                response = _create(fallback_model)
+            except anthropic.APIStatusError as e2:
+                logger.exception("Anthropic API error (fallback)")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Anthropic API error: {e2.status_code} {e2.message}",
+                ) from e2
+        else:
+            logger.exception("Anthropic API error")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Anthropic API error: {e.status_code} {e.message}",
+            ) from e
     except anthropic.APIError as e:
         logger.exception("Anthropic client error")
         raise HTTPException(status_code=502, detail=str(e)[:300]) from e

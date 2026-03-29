@@ -56,6 +56,8 @@ pip install -r requirements.txt
 
 # Set environment variables
 export ANTHROPIC_API_KEY=sk-ant-...
+# Optional: default is claude-3-5-sonnet-20241022 (broadly enabled). For Sonnet 4, set:
+# export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 export UPSTASH_REDIS_URL=https://...    # optional
 export UPSTASH_REDIS_TOKEN=...          # optional
 
