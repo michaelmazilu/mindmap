@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
 from cache import ActivationCache
+from heuristic import predict_heuristic
 
 logger = logging.getLogger(__name__)
 
@@ -239,24 +240,13 @@ def normalize_prediction(data: dict) -> dict:
     return {"regions": regions[:3], "interpretation": interp.strip()[:600]}
 
 
-@app.post("/predict", response_model=PredictResponse)
-async def predict(req: PredictRequest):
-    text = req.tweet_text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Empty tweet text")
-    if len(text) > 4000:
-        text = text[:4000]
-
-    cache_key = hash_text(text)
-
-    cached = cache.get(cache_key)
-    if cached:
-        try:
-            return PredictResponse(**normalize_prediction(cached))
-        except Exception:
-            pass
-
-    client = get_claude_client()
+def _try_claude(text: str, cache_key: str) -> Optional[dict]:
+    """Attempt Claude prediction. Returns normalized dict or None on failure."""
+    try:
+        client = get_claude_client()
+    except HTTPException:
+        logger.info("No Claude API key configured — using heuristic")
+        return None
 
     prompt = CLAUDE_PROMPT_TEMPLATE.replace(
         "__TWEET_BODY__",
@@ -276,76 +266,151 @@ async def predict(req: PredictRequest):
         )
 
     response = None
-    last_status_err: Optional[anthropic.APIStatusError] = None
     candidates = _model_candidates(client)
 
     for model_id in candidates:
         try:
             response = _create(model_id)
-            if model_id != candidates[0]:
-                logger.info("Anthropic OK with model=%s", model_id)
             break
         except anthropic.APIStatusError as e:
-            last_status_err = e
-            if e.status_code == 401:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Anthropic rejected the API key (401). "
-                        "Recreate the secret in Modal with a key from console.anthropic.com "
-                        "(no line breaks). Bedrock/Vertex keys do not work here."
-                    ),
-                ) from e
-            if e.status_code in (400, 404):
+            if e.status_code in (400, 401, 403, 404, 429):
                 logger.warning(
-                    "Anthropic %s for model=%s: %s — trying next",
-                    e.status_code,
-                    model_id,
+                    "Anthropic %s for model=%s: %s",
+                    e.status_code, model_id,
                     getattr(e, "message", str(e))[:200],
                 )
                 continue
-            logger.exception("Anthropic API error")
-            raise HTTPException(
-                status_code=502,
-                detail=f"Anthropic API error: {e.status_code} {e.message}",
-            ) from e
-        except anthropic.APIError as e:
-            logger.exception("Anthropic client error")
-            raise HTTPException(status_code=502, detail=str(e)[:300]) from e
+            logger.exception("Anthropic API error %s", e.status_code)
+            return None
+        except Exception:
+            logger.exception("Claude call failed")
+            return None
 
-    if response is None and last_status_err is not None:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "No Claude model accepted requests for this key. "
-                f"Last error: {last_status_err.status_code} {last_status_err.message}. "
-                "Confirm ANTHROPIC_API_KEY is from https://console.anthropic.com/ (API Keys), "
-                "not AWS Bedrock. Redeploy after fixing the secret."
-            ),
-        ) from last_status_err
+    if response is None:
+        return None
 
-    raw_text = extract_text_from_message(response)
+    try:
+        raw_text = extract_text_from_message(response)
+    except HTTPException:
+        return None
 
     try:
         parsed = parse_prediction_json(raw_text)
-        normalized = normalize_prediction(parsed)
+        return normalize_prediction(parsed)
     except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("Bad JSON from Claude: %s | snippet=%r", e, raw_text[:400])
-        raise HTTPException(
-            status_code=502,
-            detail="Model returned invalid JSON; retry or shorten tweet.",
-        ) from e
+        logger.warning("Bad JSON from Claude: %s", e)
+        return None
 
+
+def _try_tribe(text: str) -> Optional[dict]:
+    """Run TRIBE v2 + surface atlas. Returns normalized dict or None."""
+    from atlas import surf_destrieux_top_regions
+    from tribe_runner import try_predict_vertex_activations
+
+    verts = try_predict_vertex_activations(text)
+    if verts is None:
+        return None
     try:
-        out = PredictResponse(**normalized)
+        regions = surf_destrieux_top_regions(verts, n=3)
     except Exception as e:
-        logger.exception("Response validation failed: %s", normalized)
-        raise HTTPException(status_code=502, detail="Prediction shape invalid") from e
+        logger.warning("Atlas mapping failed: %s", e)
+        return None
+    if not regions:
+        return None
+    r0 = regions[0]["name"]
+    interp = (
+        f"TRIBE v2 predicts the strongest cortical response in {r0} "
+        f"when reading this (average-subject fMRI encoding model)."
+    )
+    return normalize_prediction({
+        "regions": regions,
+        "interpretation": interp,
+    })
 
+
+@app.post("/predict", response_model=PredictResponse)
+async def predict(req: PredictRequest):
+    text = req.tweet_text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty tweet text")
+    if len(text) > 4000:
+        text = text[:4000]
+
+    cache_key = hash_text(text)
+
+    cached = cache.get(cache_key)
+    if cached:
+        try:
+            return PredictResponse(**normalize_prediction(cached))
+        except Exception:
+            pass
+
+    normalized = _try_tribe(text)
+    source = "tribe_v2"
+
+    if normalized is None:
+        normalized = _try_claude(text, cache_key)
+        source = "claude"
+
+    if normalized is None:
+        logger.info("TRIBE/Claude unavailable — heuristic engine")
+        normalized = normalize_prediction(predict_heuristic(text))
+        source = "heuristic"
+
+    out = PredictResponse(**normalized)
     cache.set(cache_key, normalized, ttl=604800)
+    logger.info("Prediction served via %s for hash=%s", source, cache_key)
     return out
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "1.0.0"}
+
+
+@app.get("/debug")
+async def debug():
+    """Diagnostic endpoint — shows exactly what Anthropic says about this key."""
+    results: dict[str, Any] = {"key_prefix": "", "models": [], "test_calls": []}
+
+    api_key = _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY"))
+    if not api_key:
+        return {"error": "ANTHROPIC_API_KEY env var is empty or missing"}
+
+    results["key_prefix"] = api_key[:12] + "..." + api_key[-4:]
+    results["key_length"] = len(api_key)
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    try:
+        page = client.models.list(limit=20)
+        results["models"] = [
+            {"id": getattr(m, "id", "?"), "name": getattr(m, "display_name", "?")}
+            for m in page.data
+        ]
+    except Exception as e:
+        results["models_error"] = f"{type(e).__name__}: {e}"
+
+    for model_id in _model_candidates(client)[:4]:
+        entry: dict[str, Any] = {"model": model_id}
+        try:
+            resp = client.messages.create(
+                model=model_id,
+                max_tokens=32,
+                messages=[{"role": "user", "content": [{"type": "text", "text": "Say hi"}]}],
+            )
+            entry["status"] = "ok"
+            entry["response"] = resp.content[0].text if resp.content else "empty"
+        except anthropic.APIStatusError as e:
+            entry["status"] = "error"
+            entry["code"] = e.status_code
+            entry["body"] = str(e.body)[:500] if hasattr(e, "body") else None
+            entry["message"] = str(e.message)[:500]
+        except Exception as e:
+            entry["status"] = "error"
+            entry["message"] = f"{type(e).__name__}: {e}"
+        results["test_calls"].append(entry)
+        if entry.get("status") == "ok":
+            break
+
+    return results

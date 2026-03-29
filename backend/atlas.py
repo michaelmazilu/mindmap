@@ -160,3 +160,112 @@ class BrainAtlas:
             })
 
         return results
+
+def _resample_to_length(activations: np.ndarray, target: int) -> np.ndarray:
+    """Linearly resample 1D activations to *target* vertices (fsaverage5 cortical)."""
+    arr = np.asarray(activations, dtype=np.float64).ravel()
+    if arr.size == target:
+        return arr
+    if arr.size < 2:
+        return np.full(target, float(arr[0]) if arr.size else 0.0)
+    x_old = np.linspace(0.0, 1.0, arr.size)
+    x_new = np.linspace(0.0, 1.0, target)
+    return np.interp(x_new, x_old, arr)
+
+
+def _function_for_destrieux(name: str) -> str:
+    """Map Destrieux-style label to a short functional gloss."""
+    u = name.upper()
+    if "VISUAL" in u or "OCCIP" in u or "CALCAR" in u:
+        return "visual processing"
+    if "TEMPORAL" in u and ("POLE" in u or "ENTO" in u):
+        return "social cognition"
+    if "STS" in u or "SUPERIOR TEMPORAL" in u:
+        return "language / social perception"
+    if "INSULA" in u:
+        return "emotional awareness"
+    if "CING" in u:
+        return "conflict monitoring"
+    if "PRECUNE" in u:
+        return "self-referential thought"
+    if "FRONTAL" in u or "PARS" in u or "OPERC" in u:
+        return "executive / language-related cortex"
+    if "PARIET" in u or "ANGULAR" in u:
+        return "semantic integration"
+    if "MOTOR" in u or "PRE-CENT" in u or "PRECENT" in u:
+        return "movement planning"
+    if "HIPPO" in u or "PARAHIPPO" in u:
+        return "memory-related cortex"
+    return "cortical information processing"
+
+
+def surf_destrieux_top_regions(activations: np.ndarray, n: int = 3) -> list[dict]:
+    """
+    Map TRIBE v2 vertex activations to top Destrieux parcels on fsaverage5.
+
+    TRIBE outputs are cortical vertices; we align to nilearn's surface Destrieux
+    atlas (10242 vertices per hemisphere).
+    """
+    try:
+        from nilearn.datasets import fetch_atlas_surf_destrieux
+    except ImportError as e:
+        raise RuntimeError("nilearn required for surface atlas: pip install nilearn") from e
+
+    atlas = fetch_atlas_surf_destrieux()
+    n_l = int(atlas["map_left"].shape[0])
+    n_r = int(atlas["map_right"].shape[0])
+    target = n_l + n_r
+
+    arr = _resample_to_length(activations, target)
+    left = arr[:n_l]
+    right = arr[n_l : n_l + n_r]
+
+    labels = atlas["labels"]
+    sum_by: dict[int, float] = {}
+    cnt_by: dict[int, int] = {}
+
+    def accumulate(side_map, side_act):
+        for vi in range(side_map.shape[0]):
+            li = int(side_map[vi])
+            if li < 0:
+                continue
+            name = str(labels[li]) if li < len(labels) else f"label_{li}"
+            if not name or name.lower() in ("medial_wall", "unknown", "background"):
+                continue
+            sum_by[li] = sum_by.get(li, 0.0) + float(side_act[vi])
+            cnt_by[li] = cnt_by.get(li, 0) + 1
+
+    accumulate(atlas["map_left"], left)
+    accumulate(atlas["map_right"], right)
+
+    means: list[tuple[int, float, str]] = []
+    for li, s in sum_by.items():
+        c = cnt_by.get(li, 1)
+        m = s / max(c, 1)
+        nm = str(labels[li]) if li < len(labels) else f"region_{li}"
+        means.append((li, m, nm))
+
+    means.sort(key=lambda t: t[1], reverse=True)
+
+    # Scale raw means to widget-friendly 0.2–0.95
+    top = means[: max(n, 3)]
+    if not top:
+        return [
+            {"name": "Cortex (unspecified)", "activation": 0.5, "function": "cortical processing"},
+        ]
+    vals = np.array([t[1] for t in top[:n]], dtype=np.float64)
+    lo, hi = float(vals.min()), float(vals.max())
+    if hi - lo < 1e-9:
+        scaled = np.full(len(vals), 0.55)
+    else:
+        scaled = 0.2 + (vals - lo) / (hi - lo) * 0.75
+
+    out: list[dict] = []
+    for i, (_, _raw, nm) in enumerate(top[:n]):
+        out.append({
+            "name": nm.replace("_", " ")[:160],
+            "activation": round(float(scaled[i]), 3),
+            "function": _function_for_destrieux(nm),
+        })
+    return out
+
