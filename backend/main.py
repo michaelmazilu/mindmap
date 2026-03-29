@@ -42,13 +42,61 @@ _MODEL_CHAIN_DEFAULT = [
 ]
 
 
-def _model_candidates() -> list[str]:
+def _sanitize_api_key(raw: Optional[str]) -> str:
+    """Modal/CLI secrets often include trailing newlines or quotes."""
+    if not raw:
+        return ""
+    k = raw.strip()
+    if len(k) >= 2 and k[0] == k[-1] and k[0] in "\"'":
+        k = k[1:-1].strip()
+    k = k.replace("\r", "").replace("\n", "").strip()
+    return k
+
+
+def _discover_model_ids(client: anthropic.Anthropic) -> list[str]:
+    """Use Anthropic's model list so we only try IDs your key actually has."""
+    try:
+        page = client.models.list(limit=100)
+        ids: list[str] = []
+        for item in page.data:
+            mid = getattr(item, "id", None)
+            if isinstance(mid, str) and mid.startswith("claude-"):
+                ids.append(mid)
+
+        def rank(m: str) -> tuple:
+            ml = m.lower()
+            if "haiku" in ml:
+                return (0, m)
+            if "sonnet" in ml:
+                return (1, m)
+            if "opus" in ml:
+                return (2, m)
+            return (3, m)
+
+        ids.sort(key=rank)
+        if ids:
+            logger.info("Discovered %s Claude model(s) for this key", len(ids))
+        return ids
+    except anthropic.APIStatusError as e:
+        logger.warning("models.list failed HTTP %s: %s", e.status_code, e.message)
+        return []
+    except Exception as e:
+        logger.warning("models.list failed: %s", e)
+        return []
+
+
+def _model_candidates(client: anthropic.Anthropic) -> list[str]:
+    discovered = _discover_model_ids(client)
     env = os.environ.get("ANTHROPIC_MODEL", "").strip()
     seen: set[str] = set()
     out: list[str] = []
     if env:
         out.append(env)
         seen.add(env)
+    for m in discovered:
+        if m not in seen:
+            out.append(m)
+            seen.add(m)
     for m in _MODEL_CHAIN_DEFAULT:
         if m not in seen:
             out.append(m)
@@ -102,7 +150,7 @@ class PredictResponse(BaseModel):
 def get_claude_client() -> anthropic.Anthropic:
     global claude_client
     if claude_client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY"))
         if not api_key:
             raise HTTPException(
                 status_code=503,
@@ -219,12 +267,17 @@ async def predict(req: PredictRequest):
         return client.messages.create(
             model=model_id,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                }
+            ],
         )
 
     response = None
     last_status_err: Optional[anthropic.APIStatusError] = None
-    candidates = _model_candidates()
+    candidates = _model_candidates(client)
 
     for model_id in candidates:
         try:
@@ -234,6 +287,15 @@ async def predict(req: PredictRequest):
             break
         except anthropic.APIStatusError as e:
             last_status_err = e
+            if e.status_code == 401:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Anthropic rejected the API key (401). "
+                        "Recreate the secret in Modal with a key from console.anthropic.com "
+                        "(no line breaks). Bedrock/Vertex keys do not work here."
+                    ),
+                ) from e
             if e.status_code in (400, 404):
                 logger.warning(
                     "Anthropic %s for model=%s: %s — trying next",
@@ -255,9 +317,10 @@ async def predict(req: PredictRequest):
         raise HTTPException(
             status_code=502,
             detail=(
-                "No working Claude model for this API key. "
+                "No Claude model accepted requests for this key. "
                 f"Last error: {last_status_err.status_code} {last_status_err.message}. "
-                "Set ANTHROPIC_MODEL in Modal to a model shown in console.anthropic.com → Models."
+                "Confirm ANTHROPIC_API_KEY is from https://console.anthropic.com/ (API Keys), "
+                "not AWS Bedrock. Redeploy after fixing the secret."
             ),
         ) from last_status_err
 
