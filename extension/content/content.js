@@ -8,6 +8,14 @@
   const TWEET_TEXT_SELECTOR = '[data-testid="tweetText"]';
   const ACTION_BAR_SELECTOR = '[role="group"]';
 
+  /** Root posts only — skip replies (short, low-signal for brain viz). */
+  function isReplyTweet(article) {
+    const ctx = article.querySelector('[data-testid="socialContext"]');
+    if (!ctx) return false;
+    const t = (ctx.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    return t.includes('replying to');
+  }
+
   let settings = {
     enabled: true,
     autoExpand: false,
@@ -254,6 +262,7 @@
     tweetEl.setAttribute(PROCESSED_ATTR, 'true');
 
     if (!settings.enabled) return;
+    if (isReplyTweet(tweetEl)) return;
 
     createWidget(tweetEl);
   }
