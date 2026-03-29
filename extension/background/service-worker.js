@@ -3,10 +3,10 @@ let inflightCount = 0;
 const requestQueue = [];
 const memoryCache = new Map();
 
-// Paste your real Modal URL after `modal deploy` (no trailing slash).
-// Example: https://michaelmazilu08--mindmap-backend-fastapi-app.modal.run
-// Leave '' if you only use "Custom API Endpoint" in the extension popup instead.
-const HOSTED_ENDPOINT = '';
+// Default Modal API host (from `modal deploy` — not the modal.com dashboard URL).
+// If yours differs, check Modal → your app → the HTTPS endpoint shown after deploy.
+const HOSTED_ENDPOINT =
+  'https://michaelmazilu08--mindmap-backend-fastapi-app.modal.run';
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -84,7 +84,12 @@ function normalizePredictUrl(endpoint) {
 async function callCustomBackend(tweetText, endpoint) {
   if (!endpoint || endpoint.includes('your-username')) {
     throw new Error(
-      'Backend URL not set. In extension popup, paste your Modal URL under Custom API Endpoint, or set HOSTED_ENDPOINT in service-worker.js.',
+      'Backend URL not set. Set HOSTED_ENDPOINT in service-worker.js or Overrides in the popup.',
+    );
+  }
+  if (endpoint.includes('modal.com/apps')) {
+    throw new Error(
+      'That is the Modal dashboard URL. Use the API host ending in .modal.run (shown after modal deploy).',
     );
   }
 
@@ -116,7 +121,9 @@ async function processRequest(tweetText, settings) {
   }
 
   let result;
-  const endpoint = settings.apiEndpoint || HOSTED_ENDPOINT;
+  let userEp = (settings.apiEndpoint || '').trim();
+  if (userEp.includes('modal.com/apps')) userEp = '';
+  const endpoint = userEp || HOSTED_ENDPOINT;
   if (endpoint) {
     result = await callCustomBackend(tweetText, endpoint);
   } else if (settings.apiKey) {
@@ -176,7 +183,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'MINDMAP_GET_SETTINGS') {
     getSettings().then((settings) => {
-      const endpoint = String(settings.apiEndpoint || HOSTED_ENDPOINT || '').trim();
+      let userEp = String(settings.apiEndpoint || '').trim();
+      if (userEp.includes('modal.com/apps')) userEp = '';
+      const endpoint = String(userEp || HOSTED_ENDPOINT || '').trim();
       const badPlaceholder = endpoint.includes('your-username');
       const hasModal = endpoint.length > 0 && !badPlaceholder;
       const hasBackend = hasModal || !!settings.apiKey;

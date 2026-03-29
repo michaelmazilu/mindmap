@@ -17,37 +17,30 @@ const els = {
   statusText: document.getElementById('statusText'),
 };
 
+function setStatus(kind, text) {
+  els.statusDot.className = 'dot' + (kind === 'on' ? ' on' : kind === 'warn' ? ' warn' : ' off');
+  els.statusText.textContent = text;
+}
+
 function updateStatus(settings, hasBackend) {
   if (!settings.enabled) {
-    els.statusDot.className = 'status-dot inactive';
-    els.statusText.textContent = 'Disabled';
+    setStatus('off', 'Off');
     return;
   }
 
   const ok = hasBackend ?? !!(settings.apiEndpoint || settings.apiKey);
 
   if (ok) {
-    els.statusDot.className = 'status-dot active';
-    if (settings.apiEndpoint) {
-      els.statusText.textContent = 'Ready — Modal URL in settings';
-    } else if (settings.apiKey) {
-      els.statusText.textContent = 'Ready — Claude direct (your key)';
-    } else {
-      els.statusText.textContent = 'Ready — bundled backend URL';
-    }
+    setStatus('on', 'Backend OK');
     return;
   }
 
-  els.statusDot.className = 'status-dot warning';
-  els.statusText.textContent = 'Paste Modal URL (or set key / dev bundle URL)';
+  setStatus('warn', 'Configure Overrides');
 }
 
 function loadSettings() {
   chrome.runtime.sendMessage({ type: 'MINDMAP_GET_SETTINGS' }, (response) => {
-    const result = response?.data
-      ? { mindmap_settings: response.data }
-      : {};
-    const settings = { ...DEFAULT_SETTINGS, ...(result.mindmap_settings || {}) };
+    const settings = { ...DEFAULT_SETTINGS, ...(response?.data || {}) };
 
     els.enabled.checked = settings.enabled;
     els.autoExpand.checked = settings.autoExpand;
@@ -69,8 +62,11 @@ function saveSettings() {
     apiEndpoint: els.apiEndpoint.value.trim().replace(/\/$/, ''),
   };
 
-  chrome.storage.sync.set({ mindmap_settings: settings });
-  updateStatus(settings);
+  chrome.storage.sync.set({ mindmap_settings: settings }, () => {
+    chrome.runtime.sendMessage({ type: 'MINDMAP_GET_SETTINGS' }, (r) => {
+      updateStatus(settings, r?.hasBackend);
+    });
+  });
 }
 
 els.enabled.addEventListener('change', saveSettings);

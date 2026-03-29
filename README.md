@@ -40,11 +40,11 @@ git clone https://github.com/michaelmazilu/mindmap.git && cd mindmap
 3. Click **Load unpacked** → select the `mindmap/extension` folder
 4. Navigate to [x.com](https://x.com)
 
-### 2. Configure API Key
+### 2. Backend (default)
 
-1. Click the 🧠 Mindmap icon in the Chrome toolbar
-2. Enter your **Claude API key** (get one at [console.anthropic.com](https://console.anthropic.com))
-3. Done — click the brain icon on any tweet
+The extension ships with a default Modal API URL in `extension/background/service-worker.js` (`HOSTED_ENDPOINT`). After `modal deploy`, confirm that URL matches the **HTTPS endpoint** Modal prints (it ends in `.modal.run`, not `modal.com/apps/...`).
+
+Optional: open the extension popup → **Overrides** to set another backend URL or a Claude API key for direct calls.
 
 ### 3. (Optional) Self-Host the Backend
 
@@ -66,7 +66,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 modal deploy modal_app.py
 ```
 
-Then set the **Custom API Endpoint** in the extension popup to your server URL.
+Then set the backend URL under **Overrides** in the extension popup (or change `HOSTED_ENDPOINT` in the service worker).
 
 ## Architecture
 
