@@ -33,9 +33,27 @@ app.add_middleware(
 cache = ActivationCache()
 claude_client: Optional[anthropic.Anthropic] = None
 
-# Sonnet 4 IDs often 400 if your key/tier does not include them — 3.5 Sonnet is widely enabled.
-# Override on Modal: modal secret create ... or env ANTHROPIC_MODEL=claude-sonnet-4-20250514
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+# Tried in order until one succeeds. Set ANTHROPIC_MODEL to pin a single model (tried first).
+_MODEL_CHAIN_DEFAULT = [
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-haiku-20240307",
+    "claude-sonnet-4-20250514",
+]
+
+
+def _model_candidates() -> list[str]:
+    env = os.environ.get("ANTHROPIC_MODEL", "").strip()
+    seen: set[str] = set()
+    out: list[str] = []
+    if env:
+        out.append(env)
+        seen.add(env)
+    for m in _MODEL_CHAIN_DEFAULT:
+        if m not in seen:
+            out.append(m)
+            seen.add(m)
+    return out
 
 # __TWEET_BODY__ replaced with json.dumps(tweet) so braces in tweets cannot break the prompt.
 CLAUDE_PROMPT_TEMPLATE = """You are a neuroscience prediction engine. Analyze this tweet and predict which brain regions would activate most strongly when reading it. Return ONLY valid JSON, no other text.
@@ -197,8 +215,6 @@ async def predict(req: PredictRequest):
         json.dumps(text, ensure_ascii=False),
     )
 
-    fallback_model = "claude-3-5-sonnet-20241022"
-
     def _create(model_id: str):
         return client.messages.create(
             model=model_id,
@@ -206,37 +222,44 @@ async def predict(req: PredictRequest):
             messages=[{"role": "user", "content": prompt}],
         )
 
-    try:
-        response = _create(ANTHROPIC_MODEL)
-    except anthropic.APIStatusError as e:
-        if (
-            e.status_code == 400
-            and ANTHROPIC_MODEL != fallback_model
-            and fallback_model
-        ):
-            logger.warning(
-                "Anthropic 400 for model=%s (%s); retrying %s",
-                ANTHROPIC_MODEL,
-                getattr(e, "message", e),
-                fallback_model,
-            )
-            try:
-                response = _create(fallback_model)
-            except anthropic.APIStatusError as e2:
-                logger.exception("Anthropic API error (fallback)")
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Anthropic API error: {e2.status_code} {e2.message}",
-                ) from e2
-        else:
+    response = None
+    last_status_err: Optional[anthropic.APIStatusError] = None
+    candidates = _model_candidates()
+
+    for model_id in candidates:
+        try:
+            response = _create(model_id)
+            if model_id != candidates[0]:
+                logger.info("Anthropic OK with model=%s", model_id)
+            break
+        except anthropic.APIStatusError as e:
+            last_status_err = e
+            if e.status_code in (400, 404):
+                logger.warning(
+                    "Anthropic %s for model=%s: %s — trying next",
+                    e.status_code,
+                    model_id,
+                    getattr(e, "message", str(e))[:200],
+                )
+                continue
             logger.exception("Anthropic API error")
             raise HTTPException(
                 status_code=502,
                 detail=f"Anthropic API error: {e.status_code} {e.message}",
             ) from e
-    except anthropic.APIError as e:
-        logger.exception("Anthropic client error")
-        raise HTTPException(status_code=502, detail=str(e)[:300]) from e
+        except anthropic.APIError as e:
+            logger.exception("Anthropic client error")
+            raise HTTPException(status_code=502, detail=str(e)[:300]) from e
+
+    if response is None and last_status_err is not None:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "No working Claude model for this API key. "
+                f"Last error: {last_status_err.status_code} {last_status_err.message}. "
+                "Set ANTHROPIC_MODEL in Modal to a model shown in console.anthropic.com → Models."
+            ),
+        ) from last_status_err
 
     raw_text = extract_text_from_message(response)
 

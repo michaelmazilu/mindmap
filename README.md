@@ -56,8 +56,8 @@ pip install -r requirements.txt
 
 # Set environment variables
 export ANTHROPIC_API_KEY=sk-ant-...
-# Optional: default is claude-3-5-sonnet-20241022 (broadly enabled). For Sonnet 4, set:
-# export ANTHROPIC_MODEL=claude-sonnet-4-20250514
+# Optional: ANTHROPIC_MODEL pins the first model tried; the server then tries a built-in
+# chain (Haiku → Sonnet 3.5 → Haiku 3 → Sonnet 4) until one works for your key.
 export UPSTASH_REDIS_URL=https://...    # optional
 export UPSTASH_REDIS_TOKEN=...          # optional
 
