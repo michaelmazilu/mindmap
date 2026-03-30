@@ -397,7 +397,10 @@ async def health():
 
 @app.get("/debug")
 async def debug():
-    """Diagnostic endpoint — shows exactly what Anthropic says about this key."""
+    """Diagnostic endpoint — disabled in production unless MINDMAP_ENABLE_DEBUG=1."""
+    if os.environ.get("MINDMAP_ENABLE_DEBUG", "").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(status_code=404, detail="Not found")
+
     results: dict[str, Any] = {"key_prefix": "", "models": [], "test_calls": []}
 
     api_key = _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY"))
