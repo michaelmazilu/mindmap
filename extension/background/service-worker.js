@@ -1,12 +1,22 @@
+// Optional: `config.local.js` (gitignored) sets self.MINDMAP_HOSTED_ENDPOINT — see config.example.js
+try {
+  importScripts('config.local.js');
+} catch (e) {
+  /* missing config.local.js is OK — use popup Overrides or heuristic-only */
+}
+
 const MAX_CONCURRENT = 3;
 let inflightCount = 0;
 const requestQueue = [];
 const memoryCache = new Map();
 
-// Default Modal API host (from `modal deploy` — not the modal.com dashboard URL).
-// If yours differs, check Modal → your app → the HTTPS endpoint shown after deploy.
+// Modal + TRIBE cold start can exceed 2m; beyond this we fall back to local heuristic so the UI never spins forever.
+const BACKEND_FETCH_TIMEOUT_MS = 120000;
+
 const HOSTED_ENDPOINT =
-  'https://michaelmazilu08--mindmap-backend-fastapi-app.modal.run';
+  typeof self.MINDMAP_HOSTED_ENDPOINT === 'string' && self.MINDMAP_HOSTED_ENDPOINT.trim()
+    ? self.MINDMAP_HOSTED_ENDPOINT.trim()
+    : '';
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -84,7 +94,7 @@ function normalizePredictUrl(endpoint) {
 async function callCustomBackend(tweetText, endpoint) {
   if (!endpoint || endpoint.includes('your-username')) {
     throw new Error(
-      'Backend URL not set. Set HOSTED_ENDPOINT in service-worker.js or Overrides in the popup.',
+      'Backend URL not set. Copy extension/background/config.example.js to config.local.js, or set API endpoint in the popup Overrides.',
     );
   }
   if (endpoint.includes('modal.com/apps')) {
@@ -93,17 +103,30 @@ async function callCustomBackend(tweetText, endpoint) {
     );
   }
 
+  const url = normalizePredictUrl(endpoint);
+  const ac = new AbortController();
+  const tid = setTimeout(() => ac.abort(), BACKEND_FETCH_TIMEOUT_MS);
+
   let response;
   try {
-    response = await fetch(normalizePredictUrl(endpoint), {
+    response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tweet_text: tweetText }),
+      signal: ac.signal,
     });
   } catch (e) {
+    const name = e && e.name;
+    if (name === 'AbortError') {
+      throw new Error(
+        'BACKEND_TIMEOUT: Server took too long (cold GPU / TRIBE / VPN). Showing offline estimate.',
+      );
+    }
     throw new Error(
-      'Cannot reach backend (network). Confirm the Modal URL, reload the extension after updating manifest, and try again.',
+      'Cannot reach backend (network/VPN?). Confirm the Modal URL, try without VPN, reload the extension.',
     );
+  } finally {
+    clearTimeout(tid);
   }
 
   if (!response.ok) {
@@ -112,6 +135,157 @@ async function callCustomBackend(tweetText, endpoint) {
   }
   return await response.json();
 }
+
+// --------------- Local heuristic engine (no API needed) ---------------
+
+const _LEXICONS = {
+  fear_threat: {
+    regions: ['Amygdala', 'Anterior Cingulate Cortex', 'Insula'],
+    functions: ['threat detection', 'conflict monitoring', 'visceral awareness'],
+    keywords: 'afraid alarming anxiety attack banned bomb catastrophe collapse crash crisis danger dead death destroy disaster doom emergency enemy explode fatal fear fight fire flood gun harm hate horror hurt kill murder panic poison risk scared shock suffer terror threat toxic trauma victim violence virus war warning weapon worry'.split(' '),
+    interpretations: [
+      'Your amygdala hijacked rational thought before you finished the first word.',
+      'This tweet weaponizes your threat-detection circuitry to bypass logic.',
+      'Fear pathways activated faster than your prefrontal cortex could intervene.',
+    ],
+  },
+  reward_desire: {
+    regions: ['Nucleus Accumbens', 'Orbitofrontal Cortex', 'Ventromedial PFC'],
+    functions: ['reward anticipation', 'value assessment', 'emotional valuation'],
+    keywords: 'amazing beautiful best buy cash cheap crypto deal delicious desire discount dream earn easy exclusive fortune free gain goal gold gorgeous giveaway hack income invest jackpot luxury million money offer opportunity passive perfect premium profit promotion revenue rich sale save secret stock success treasure upgrade wealth win'.split(' '),
+    interpretations: [
+      'Dopamine circuits activated before conscious evaluation — you\'re already hooked.',
+      'Your reward system valued the promise before your logic centers checked the math.',
+      'This tweet speaks directly to the brain\'s want circuits, bypassing reason.',
+    ],
+  },
+  social_identity: {
+    regions: ['Superior Temporal Sulcus', 'Temporal Pole', 'Precuneus'],
+    functions: ['social perception', 'social cognition', 'self-referential thought'],
+    keywords: 'agree believe belong betray blame bro cancel community debate disagree empathy family fam follow friend gang group hug influence join judge king leader like love loyal marry mentor opinion our partner people queen ratio relationship respect share side stan subscribe support team together tribe trust unfollow us vibe vote we'.split(' '),
+    interpretations: [
+      'Your brain\'s social-identity network lit up — tribalism circuits fully engaged.',
+      'Mirror neurons activated: you\'re simulating the author\'s mental state involuntarily.',
+      'Self-referential processing triggered — this tweet made you think about *you*.',
+    ],
+  },
+  analytical: {
+    regions: ['Dorsolateral PFC', "Broca's Area", 'Angular Gyrus'],
+    functions: ['executive reasoning', 'language processing', 'semantic integration'],
+    keywords: 'according actually algorithm analysis argue because bias calculate cause claim compare complex conclude consequence consider context correlate data debate define demonstrate despite detail difference effect estimate evaluate evidence example explain fact figure however hypothesis implication indeed logic moreover number nuance observe percent proof prove ratio reason research result science significant source statistic study theory therefore thus variable'.split(' '),
+    interpretations: [
+      'Your prefrontal cortex engaged deeply — but analytical effort makes you trust more, not less.',
+      'Language processing areas working overtime — complexity creates an illusion of authority.',
+      'Semantic integration circuits activated: your brain is building a narrative it may not question.',
+    ],
+  },
+  outrage_moral: {
+    regions: ['Anterior Cingulate Cortex', 'Insula', 'Amygdala'],
+    functions: ['conflict monitoring', 'moral disgust', 'emotional arousal'],
+    keywords: 'absurd angry awful corrupt criminal cruel despicable disgusting embarrassing evil exploit fraud furious greed horrible hypocrisy idiot illegal immoral incompetent injustice insane liar lie manipulate outrage pathetic predator propaganda racist rage scandal scam shame sick steal stupid terrible trash unfair unforgivable vile wrong'.split(' '),
+    interpretations: [
+      'Moral outrage activated your anterior cingulate — engagement guaranteed, nuance discarded.',
+      'Your insula registered disgust in milliseconds; the tweet was engineered for exactly this.',
+      'Outrage is the most viral emotion — your brain just proved why.',
+    ],
+  },
+  nostalgia_memory: {
+    regions: ['Hippocampus', 'Precuneus', 'Posterior Cingulate Cortex'],
+    functions: ['memory retrieval', 'autobiographical recall', 'emotional memory'],
+    keywords: 'childhood classic generations golden heritage history home legend memories miss nostalgia old once original past remember retro reunion roots school simpler throwback tradition vintage wish yesterday young youth'.split(' '),
+    interpretations: [
+      'Memory circuits activated — nostalgia is a drug and this tweet is the dealer.',
+      'Your hippocampus just time-traveled; the present moment lost its grip on you.',
+      'Autobiographical memory networks lit up: you\'re feeling, not thinking.',
+    ],
+  },
+  visual_sensory: {
+    regions: ['Visual Cortex', 'Fusiform Gyrus', 'Superior Colliculus'],
+    functions: ['visual processing', 'pattern recognition', 'visual attention'],
+    keywords: 'aesthetic art beautiful bright color dark design eye face film glow gorgeous graphic green icon illustration image landscape light look meme neon paint photo picture pink pixel portrait pretty purple rainbow red scenery screenshot shadow shape sky stunning sunset texture view visual watch'.split(' '),
+    interpretations: [
+      'Visual processing areas recruited heavily — your attention was captured, not given.',
+      'Fusiform gyrus activated: your brain treated this content like a face to memorize.',
+      'Your visual cortex processed this faster than language — imagery bypasses critical thinking.',
+    ],
+  },
+};
+
+const _DEFAULT_CAT = {
+  regions: ['Prefrontal Cortex', "Wernicke's Area", 'Anterior Cingulate Cortex'],
+  functions: ['executive control', 'language comprehension', 'attention allocation'],
+  interpretations: [
+    'Multiple cortical areas activated — your brain allocated more resources than this tweet deserves.',
+    'Default-mode network disrupted: scrolling just became processing.',
+    'Language comprehension circuits engaged, extracting meaning from noise.',
+  ],
+};
+
+function _seededRandom(text) {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) - h + text.charCodeAt(i)) | 0;
+  }
+  h = Math.abs(h);
+  return () => {
+    h = (h * 16807 + 0) % 2147483647;
+    return (h - 1) / 2147483646;
+  };
+}
+
+function predictHeuristic(tweetText) {
+  const lower = (tweetText || 'empty').toLowerCase();
+  const words = new Set(lower.split(/\s+/));
+  const rng = _seededRandom(lower);
+
+  const scores = Object.entries(_LEXICONS).map(([name, cat]) => {
+    let hits = 0;
+    for (const kw of cat.keywords) {
+      if (words.has(kw) || lower.includes(kw)) hits++;
+    }
+    return [name, hits];
+  });
+  scores.sort((a, b) => b[1] - a[1]);
+
+  const topCats = scores.filter(s => s[1] > 0).slice(0, 2).map(s => s[0]);
+  if (topCats.length === 0) topCats.push(scores[0][0]);
+
+  const primary = _LEXICONS[topCats[0]] || _DEFAULT_CAT;
+  const secondary = topCats[1] ? (_LEXICONS[topCats[1]] || _DEFAULT_CAT) : _DEFAULT_CAT;
+
+  const pick = (min, max) => +(min + rng() * (max - min)).toFixed(2);
+
+  const regions = [];
+  const seen = new Set();
+
+  function addRegion(name, activation, fn) {
+    if (!seen.has(name)) {
+      seen.add(name);
+      regions.push({ name, activation, function: fn });
+    }
+  }
+
+  addRegion(primary.regions[0], pick(0.65, 0.95), primary.functions[0]);
+  addRegion(primary.regions[1] || secondary.regions[0], pick(0.40, 0.70), primary.functions[1] || secondary.functions[0]);
+  addRegion(secondary.regions[0] !== primary.regions[0] ? secondary.regions[0] : (primary.regions[2] || _DEFAULT_CAT.regions[0]), pick(0.25, 0.50), secondary.functions[0]);
+
+  while (regions.length < 3) {
+    for (const r of _DEFAULT_CAT.regions) {
+      if (!seen.has(r)) {
+        addRegion(r, pick(0.20, 0.40), _DEFAULT_CAT.functions[regions.length % _DEFAULT_CAT.functions.length]);
+        break;
+      }
+    }
+  }
+
+  const idx = Math.floor(rng() * primary.interpretations.length);
+  return {
+    regions: regions.slice(0, 3),
+    interpretation: primary.interpretations[idx],
+  };
+}
+
+// --------------- Request processing ---------------
 
 async function processRequest(tweetText, settings) {
   const cacheKey = hashText(tweetText);
@@ -124,12 +298,25 @@ async function processRequest(tweetText, settings) {
   let userEp = (settings.apiEndpoint || '').trim();
   if (userEp.includes('modal.com/apps')) userEp = '';
   const endpoint = userEp || HOSTED_ENDPOINT;
-  if (endpoint) {
-    result = await callCustomBackend(tweetText, endpoint);
-  } else if (settings.apiKey) {
-    result = await callClaudeMVP(tweetText, settings.apiKey);
-  } else {
-    throw new Error('No backend configured. Open Mindmap settings.');
+
+  try {
+    if (endpoint) {
+      result = await callCustomBackend(tweetText, endpoint);
+    } else if (settings.apiKey) {
+      result = await callClaudeMVP(tweetText, settings.apiKey);
+    } else {
+      result = predictHeuristic(tweetText);
+    }
+  } catch (err) {
+    console.warn('[Mindmap] API failed, using heuristic:', err.message);
+    result = predictHeuristic(tweetText);
+    if (String(err.message || '').startsWith('BACKEND_TIMEOUT')) {
+      result = {
+        ...result,
+        interpretation:
+          `[Preview — server timed out after ${BACKEND_FETCH_TIMEOUT_MS / 1000}s; TRIBE may be cold or VPN blocked.] ${result.interpretation}`,
+      };
+    }
   }
 
   memoryCache.set(cacheKey, result);

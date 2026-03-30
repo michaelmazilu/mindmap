@@ -24,17 +24,49 @@
 
   const widgetMap = new WeakMap();
 
-  function loadSettings() {
-    chrome.runtime.sendMessage({ type: 'MINDMAP_GET_SETTINGS' }, (response) => {
-      if (response && response.data) {
-        settings = { ...settings, ...response.data };
+  /**
+   * After extension reload/update, content scripts keep running but chrome.runtime is dead.
+   * Without this, sendMessage throws "Extension context invalidated".
+   */
+  function safeRuntimeSendMessage(message, callback) {
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) {
+        callback(null, new Error('Extension unavailable'));
+        return;
       }
+      chrome.runtime.sendMessage(message, (response) => {
+        const le = chrome.runtime.lastError;
+        if (le) {
+          const msg = le.message || String(le);
+          if (/context invalidated|extension context/i.test(msg)) {
+            callback(null, new Error('Mindmap was reloaded — refresh this page (F5)'));
+            return;
+          }
+          callback(null, new Error(msg));
+          return;
+        }
+        callback(response, null);
+      });
+    } catch (e) {
+      callback(null, e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  function loadSettings() {
+    safeRuntimeSendMessage({ type: 'MINDMAP_GET_SETTINGS' }, (response, err) => {
+      if (err || !response || !response.data) return;
+      settings = { ...settings, ...response.data };
     });
   }
 
   chrome.storage.onChanged.addListener((changes) => {
-    if (changes.mindmap_settings) {
-      settings = { ...settings, ...changes.mindmap_settings.newValue };
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) return;
+      if (changes.mindmap_settings) {
+        settings = { ...settings, ...changes.mindmap_settings.newValue };
+      }
+    } catch (e) {
+      /* invalid context */
     }
   });
 
@@ -54,6 +86,149 @@
     if (value > 0.66) return 'linear-gradient(90deg, #8b0000, #ff4500, #ffdd00)';
     if (value > 0.33) return 'linear-gradient(90deg, #8b0000, #ff4500)';
     return '#8b0000';
+  }
+
+  /**
+   * Copy patterns that often aim to provoke, shame, or spike stress — TRIBE only sees
+   * language-related cortex for many of these, so region names alone miss "ragebait".
+   */
+  function isRagebaitTweetText(text) {
+    const s = (text || '').toLowerCase();
+    if (!s.trim()) return false;
+    if (/absurd|outrage|disgusting|vile|scam|liar|fraud|pathetic|unforgivable|\bhate\b|\bangry\b|\brage\b|crook|evil\b|cruel|hypocrisy|injustice|manipulat/i.test(s)) {
+      return true;
+    }
+    if (/leave you with nothing|expensive dopamine|don'?t leave you|nothing when you|while you(?:'re| are) (?:busy|asleep|scrolling)/i.test(s)) {
+      return true;
+    }
+    if (/\bdopamine\b/.test(s) && /(?:gym|business|grind|hustle|obsess|progress|momentum|skill|game)/i.test(s)) {
+      return true;
+    }
+    if (/\b(?:you'?re|you are) (?:lazy|weak|wrong|stupid|pathetic|soft)\b/i.test(s)) {
+      return true;
+    }
+    return false;
+  }
+
+  /** Limbic / anger–threat circuitry, interpretation, or manipulative copy. */
+  function isRagebaitActivation(data, tweetText) {
+    if (isRagebaitTweetText(tweetText)) return true;
+    const regions = data.regions || [];
+    const patterns = [
+      /amygdal/i,
+      /\binsul/i,
+      /hypothal/i,
+      /periaqueduct/i,
+      /threat\s+detection/i,
+      /moral\s+disgust/i,
+      /emotional\s+arousal/i,
+      /conflict\s+monitoring/i,
+      /outrage/i,
+      /\brage\b/i,
+      /\bang(er|ry)\b/i,
+      /hostilit/i,
+      /aggress/i,
+    ];
+    for (const r of regions) {
+      const act = Number(r.activation) || 0;
+      if (act < 0.32) continue;
+      const blob = `${r.name || ''} ${r.function || ''}`;
+      for (const p of patterns) {
+        if (p.test(blob)) return true;
+      }
+    }
+    const interp = data.interpretation || '';
+    if (/\brage|outrage|ragebait|amygdal|threat|anger\b|cortisol/i.test(interp)) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Felt affect from wording — TRIBE region labels describe *where* language is processed,
+   * not whether the post is motivational bait, outrage, etc.
+   */
+  function inferEmotionFromTweetText(text) {
+    const t = (text || '').toLowerCase();
+    if (!t.trim()) return null;
+    const ordered = [
+      {
+        re: /absurd|outrage|disgusting|vile|scam|liar|fraud|pathetic|unforgivable|\bhate\b|\bangry\b|\brage\b|crook|evil\b|cruel|hypocrisy|injustice|immoral|incompetent|idiot|stupid|terrible|awful|wrongdoing/i,
+        label: 'Indignation or reactive anger',
+      },
+      {
+        re: /\bdanger\b|threat|afraid|anxiety|panic|terror|disaster|emergency|violence|\bkill\b|\bdeath\b|catastrophe/i,
+        label: 'Unease or vigilance',
+      },
+      {
+        re: /leave you with nothing|expensive dopamine|don'?t leave you|nothing when you|while you(?:'re| are) (?:busy|asleep)/i,
+        label: 'Comparison or inadequacy bait',
+      },
+      {
+        re: /\bdopamine\b|obsess|obsession|momentum|grind\b|hustle|\bsigma\b|push into|become obsessed|build momentum|no excuses|discipline|10x|grindset/i,
+        label: 'Driven craving or self-pressure',
+      },
+      {
+        re: /millionaire|crypto|\bnft\b|jackpot|passive income|free money|\$\d{2,}|\bcash\b.*\b(?:fast|now|easy)/i,
+        label: 'Wanting or anticipation',
+      },
+      {
+        re: /nostalgia|remember when|throwback|childhood|back in the day/i,
+        label: 'Nostalgia or self-reflection',
+      },
+    ];
+    for (const { re, label } of ordered) {
+      if (re.test(t)) return label;
+    }
+    return null;
+  }
+
+  /**
+   * Guess the dominant feeling the content is "designed" to evoke, from region labels
+   * (TRIBE Destrieux names, heuristic names, or API function strings). Activation weights the mix.
+   */
+  function inferDominantEmotion(regions, tweetText) {
+    const fromText = inferEmotionFromTweetText(tweetText);
+    if (fromText) return fromText;
+
+    if (!regions || !regions.length) return 'Absorbed attention';
+
+    const rules = [
+      { re: /amygdal|threat|fear|panic|terror|hypothal|trauma/, label: 'Unease or vigilance' },
+      { re: /insula|disgust|moral|outrage|indign|hostil|rage|anger/, label: 'Indignation or disgust' },
+      { re: /accumbens|reward|orbitofront|value|anticipat|wanting/, label: 'Wanting or anticipation' },
+      { re: /hippocamp|memory|nostalgia|precuneus|posterior cingul/, label: 'Nostalgia or self-reflection' },
+      /* Destrieux temporal labels = language cortex for reading, not "curiosity" as a feeling */
+      { re: /temporal|heschl|planum|wernicke|broca|language|semantic|comprehen|transverse|sup-t|g temp|temp sup|collat/, label: 'Absorbed attention to language' },
+      { re: /occipital|visual|calcar|fusiform|v1|v2|striate/, label: 'Visual fascination' },
+      { re: /prefrontal|dorsolateral|executive|working memory|angular|parietal/, label: 'Careful evaluation' },
+      { re: /cingul|conflict|monitoring|acc\b/, label: 'Inner tension or doubt' },
+      { re: /motor|precentral|supplement|sma/, label: 'Urge to act or respond' },
+      { re: /\bsts\b|social|pole|mirror|bonding/, label: 'Social comparison or empathy pull' },
+    ];
+
+    const scores = new Map();
+    for (const r of regions) {
+      const act = Math.max(0, Math.min(1, Number(r.activation) || 0.5));
+      const blob = `${r.name || ''} ${r.function || ''}`.toLowerCase();
+      for (const { re, label } of rules) {
+        if (re.test(blob)) {
+          scores.set(label, (scores.get(label) || 0) + act);
+        }
+      }
+    }
+
+    if (scores.size === 0) return 'Absorbed attention';
+
+    let best = 'Absorbed attention';
+    let bestScore = 0;
+    for (const [label, s] of scores) {
+      if (s > bestScore) {
+        bestScore = s;
+        best = label;
+      }
+    }
+    return best;
   }
 
   function createWidget(tweetEl) {
@@ -86,11 +261,25 @@
       regionsContainer.appendChild(createRegionRow('—', 0, ''));
     }
 
+    const emotionBlock = document.createElement('div');
+    emotionBlock.className = 'mindmap-emotion';
+    emotionBlock.setAttribute('aria-live', 'polite');
+    emotionBlock.innerHTML =
+      '<span class="mindmap-emotion-label">Likely felt emotion</span>'
+      + '<span class="mindmap-emotion-value">—</span>';
+
+    const ragebait = document.createElement('div');
+    ragebait.className = 'mindmap-ragebait';
+    ragebait.hidden = true;
+    ragebait.setAttribute('aria-live', 'polite');
+
     const interpretation = document.createElement('div');
     interpretation.className = 'mindmap-interpretation';
     interpretation.textContent = 'Analyzing neural activation patterns…';
 
     info.appendChild(regionsContainer);
+    info.appendChild(emotionBlock);
+    info.appendChild(ragebait);
     info.appendChild(interpretation);
     inner.appendChild(canvasContainer);
     inner.appendChild(info);
@@ -108,6 +297,10 @@
     let expanded = false;
     let resultData = null;
 
+    function sortRegionsDesc(regions) {
+      return (regions || []).slice().sort((a, b) => b.activation - a.activation);
+    }
+
     function expand() {
       if (expanded) return;
       expanded = true;
@@ -115,8 +308,22 @@
       trigger.classList.add('active');
 
       if (!widget) {
-        widget = new MindmapBrainWidget(canvasContainer);
-        widget.setShimmerMode(true);
+        try {
+          widget = new MindmapBrainWidget(canvasContainer);
+          if (dataLoaded && resultData) {
+            widget.setShimmerMode(false);
+            try {
+              widget.setActivations(sortRegionsDesc(resultData.regions));
+            } catch (e) {
+              console.warn('[Mindmap] setActivations', e);
+            }
+          } else {
+            widget.setShimmerMode(true);
+          }
+        } catch (e) {
+          console.warn('[Mindmap] WebGL / brain widget failed — still fetching data', e);
+          widget = null;
+        }
       }
 
       if (!dataLoaded) {
@@ -128,6 +335,14 @@
       expanded = false;
       panel.classList.remove('expanded');
       trigger.classList.remove('active');
+      if (widget) {
+        try {
+          widget.dispose();
+        } catch (e) {
+          console.warn('[Mindmap] dispose', e);
+        }
+        widget = null;
+      }
     }
 
     trigger.addEventListener('click', (e) => {
@@ -138,11 +353,10 @@
     });
 
     function fetchPrediction(text) {
-      chrome.runtime.sendMessage(
-        { type: 'MINDMAP_PREDICT', tweetText: text },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            showError(inner, interpretation, 'Extension error — reload page');
+      safeRuntimeSendMessage({ type: 'MINDMAP_PREDICT', tweetText: text }, (response, err) => {
+        try {
+          if (err) {
+            showError(inner, interpretation, err.message || 'Extension error — reload page');
             return;
           }
           if (response && response.error) {
@@ -152,10 +366,15 @@
           if (response && response.data) {
             resultData = response.data;
             dataLoaded = true;
-            renderResult(response.data, inner, regionsContainer, interpretation, widget);
+            renderResult(response.data, inner, regionsContainer, interpretation, widget, text);
+          } else {
+            showError(inner, interpretation, 'No data from extension — reload the page');
           }
-        },
-      );
+        } catch (e) {
+          console.warn('[Mindmap] render failed', e);
+          showError(inner, interpretation, 'Mindmap UI error — try collapsing and reopening');
+        }
+      });
     }
 
     if (settings.autoExpand) {
@@ -163,11 +382,34 @@
     }
 
     widgetMap.set(tweetEl, {
-      widget,
+      get widget() {
+        return widget;
+      },
       expand,
       collapse,
-      dispose: () => widget && widget.dispose(),
+      disposeWebGL() {
+        if (widget) {
+          try {
+            widget.dispose();
+          } catch (e) {
+            /* ignore */
+          }
+          widget = null;
+        }
+      },
     });
+  }
+
+  function cleanupRemovedTweet(article) {
+    const data = widgetMap.get(article);
+    if (data && typeof data.disposeWebGL === 'function') {
+      data.disposeWebGL();
+    }
+    try {
+      widgetMap.delete(article);
+    } catch (e) {
+      /* WeakMap.delete may be unsupported in very old engines */
+    }
   }
 
   function createRegionRow(name, activation, func) {
@@ -205,7 +447,7 @@
     return row;
   }
 
-  function renderResult(data, inner, regionsContainer, interpretation, widget) {
+  function renderResult(data, inner, regionsContainer, interpretation, widget, tweetText) {
     inner.classList.remove('mindmap-loading');
 
     regionsContainer.innerHTML = '';
@@ -241,15 +483,44 @@
       interpretation.textContent = `"${data.interpretation}"`;
     }
 
-    if (widget) {
-      widget.setShimmerMode(false);
-      widget.setActivations(regions);
+    const rb = inner.querySelector('.mindmap-ragebait');
+    if (rb) {
+      if (isRagebaitActivation(data, tweetText)) {
+        rb.textContent = 'Ragebait detected, avoid cortisol spike';
+        rb.hidden = false;
+      } else {
+        rb.textContent = '';
+        rb.hidden = true;
+      }
+    }
+
+    const emoVal = inner.querySelector('.mindmap-emotion-value');
+    if (emoVal) {
+      emoVal.textContent = inferDominantEmotion(regions, tweetText);
+    }
+
+    if (widget && !widget.disposed) {
+      try {
+        widget.setShimmerMode(false);
+        widget.setActivations(regions);
+      } catch (e) {
+        console.warn('[Mindmap] brain update after load', e);
+      }
     }
   }
 
   function showError(inner, interpretation, message) {
     inner.classList.remove('mindmap-loading');
     interpretation.textContent = '';
+
+    const rb = inner.querySelector('.mindmap-ragebait');
+    if (rb) {
+      rb.textContent = '';
+      rb.hidden = true;
+    }
+
+    const emoValErr = inner.querySelector('.mindmap-emotion-value');
+    if (emoValErr) emoValErr.textContent = '—';
 
     const errEl = document.createElement('div');
     errEl.className = 'mindmap-error';
@@ -272,23 +543,20 @@
     tweets.forEach(processTweet);
   }
 
-  const visibilityObserver = new IntersectionObserver(
-    (entries) => {
-      entries.forEach((entry) => {
-        const wData = widgetMap.get(entry.target);
-        if (!wData) return;
-
-        if (!entry.isIntersecting && wData.widget) {
-          // Offscreen — no action needed yet, Three.js handles this efficiently
-        }
-      });
-    },
-    { rootMargin: '200px' },
-  );
-
   const mutationObserver = new MutationObserver((mutations) => {
     let shouldScan = false;
     for (const mutation of mutations) {
+      if (mutation.removedNodes && mutation.removedNodes.length > 0) {
+        for (const node of mutation.removedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (node.matches && node.matches(TWEET_SELECTOR)) {
+            cleanupRemovedTweet(node);
+          }
+          if (node.querySelectorAll) {
+            node.querySelectorAll(TWEET_SELECTOR).forEach(cleanupRemovedTweet);
+          }
+        }
+      }
       if (mutation.addedNodes.length > 0) {
         for (const node of mutation.addedNodes) {
           if (node.nodeType === Node.ELEMENT_NODE) {
@@ -327,9 +595,6 @@
     scanForTweets();
 
     window.addEventListener('scroll', debouncedScan, { passive: true });
-
-    const existingTweets = document.querySelectorAll(TWEET_SELECTOR);
-    existingTweets.forEach((tweet) => visibilityObserver.observe(tweet));
   }
 
   if (document.readyState === 'loading') {

@@ -8,9 +8,17 @@ class MindmapBrainWidget {
     this.regions = [];
     this.highlightedRegion = null;
     this.disposed = false;
+    this._isDragging = false;
+    this._lastPointerX = 0;
+    this._lastPointerY = 0;
+    this._camDist = 2.85;
 
     this._initScene();
     this._createBrainMesh();
+    this._setupPointerOrbit();
+    if (this.container) {
+      this.container.title = 'Drag to orbit · scroll to zoom';
+    }
     this._animate = this._animate.bind(this);
     this._animationId = requestAnimationFrame(this._animate);
   }
@@ -30,7 +38,11 @@ class MindmapBrainWidget {
     this.renderer.setSize(this.width, this.height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setClearColor(0x000000, 0);
+    this.renderer.domElement.style.cursor = 'grab';
+    this.renderer.domElement.style.touchAction = 'none';
     this.container.appendChild(this.renderer.domElement);
+
+    this._updateCameraPosition();
 
     const ambient = new THREE.AmbientLight(0x404050, 0.6);
     this.scene.add(ambient);
@@ -86,6 +98,79 @@ class MindmapBrainWidget {
     this.scene.add(this.brainGroup);
   }
 
+  _updateCameraPosition() {
+    const dir = this.camera.position.clone().normalize();
+    if (dir.lengthSq() < 1e-6) dir.set(-0.62, 0.14, 0.77).normalize();
+    this.camera.position.copy(dir.multiplyScalar(this._camDist));
+    this.camera.lookAt(0, 0, 0);
+  }
+
+  _setupPointerOrbit() {
+    const el = this.renderer.domElement;
+
+    this._onPointerDown = (e) => {
+      if (this.disposed || e.button !== 0) return;
+      this._isDragging = true;
+      this._lastPointerX = e.clientX;
+      this._lastPointerY = e.clientY;
+      el.style.cursor = 'grabbing';
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch (err) {
+        /* ignore */
+      }
+    };
+
+    this._onPointerMove = (e) => {
+      if (!this._isDragging || this.disposed) return;
+      const dx = e.clientX - this._lastPointerX;
+      const dy = e.clientY - this._lastPointerY;
+      this._lastPointerX = e.clientX;
+      this._lastPointerY = e.clientY;
+
+      const yaw = dx * 0.006;
+      const pitch = dy * 0.006;
+
+      this.camera.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), -yaw);
+
+      const right = new THREE.Vector3();
+      right.crossVectors(this.camera.position, this.camera.up).normalize();
+      if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+      this.camera.position.applyAxisAngle(right, -pitch);
+      this._camDist = this.camera.position.length();
+      this._camDist = Math.min(5.2, Math.max(1.35, this._camDist));
+      this.camera.position.normalize().multiplyScalar(this._camDist);
+      this.camera.lookAt(0, 0, 0);
+    };
+
+    this._onPointerUp = (e) => {
+      this._isDragging = false;
+      el.style.cursor = 'grab';
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch (err) {
+        /* ignore */
+      }
+    };
+
+    this._onWheel = (e) => {
+      if (this.disposed) return;
+      e.preventDefault();
+      const delta = e.deltaY * 0.0015;
+      this._camDist = Math.min(5.2, Math.max(1.35, this._camDist + delta));
+      this.camera.position.normalize().multiplyScalar(this._camDist);
+      this.camera.lookAt(0, 0, 0);
+    };
+
+    el.addEventListener('pointerdown', this._onPointerDown);
+    el.addEventListener('pointermove', this._onPointerMove);
+    el.addEventListener('pointerup', this._onPointerUp);
+    el.addEventListener('pointercancel', this._onPointerUp);
+    el.addEventListener('lostpointercapture', this._onPointerUp);
+    this._wheelOpts = { passive: false };
+    el.addEventListener('wheel', this._onWheel, this._wheelOpts);
+  }
+
   _generateBrainGeometry() {
     const base = new THREE.IcosahedronGeometry(1, 3);
     const positions = base.attributes.position;
@@ -134,8 +219,13 @@ class MindmapBrainWidget {
   }
 
   setActivations(regions) {
-    this.regions = regions;
-    this._paintActivations();
+    if (this.disposed) return;
+    this.regions = regions || [];
+    try {
+      this._paintActivations();
+    } catch (e) {
+      console.warn('[Mindmap] _paintActivations', e);
+    }
   }
 
   _paintActivations() {
@@ -147,7 +237,9 @@ class MindmapBrainWidget {
     const baseColor = new THREE.Color(0x2a2a2a);
     const vertex = new THREE.Vector3();
 
-    const regionCenters = this._getRegionCenters();
+    const resolvedCenters = this.regions.map((reg) =>
+      this._resolveActivationCenter(reg.name),
+    );
 
     for (let i = 0; i < positions.count; i++) {
       vertex.fromBufferAttribute(positions, i);
@@ -157,7 +249,7 @@ class MindmapBrainWidget {
 
       for (let r = 0; r < this.regions.length; r++) {
         const region = this.regions[r];
-        const center = regionCenters[region.name];
+        const center = resolvedCenters[r];
         if (!center) continue;
 
         const dist = vertex.distanceTo(center);
@@ -176,10 +268,10 @@ class MindmapBrainWidget {
 
       const color = this._activationToColor(maxActivation, highlighted);
 
-      if (maxActivation < 0.05) {
+      if (maxActivation < 0.02) {
         colors.setXYZ(i, baseColor.r, baseColor.g, baseColor.b);
       } else {
-        const blend = Math.min(1, maxActivation * 2);
+        const blend = Math.min(1, maxActivation * 1.4);
         colors.setXYZ(
           i,
           baseColor.r * (1 - blend) + color.r * blend,
@@ -190,6 +282,58 @@ class MindmapBrainWidget {
     }
 
     colors.needsUpdate = true;
+  }
+
+  /**
+   * Map API region labels (Destrieux, shorthand, or common names) to a point
+   * on the procedural brain so heat blobs appear. Unknown names get a stable
+   * pseudo-random cortical point so color still varies per tweet.
+   */
+  _resolveActivationCenter(rawName) {
+    const raw = (rawName || '').trim();
+    if (!raw) return null;
+
+    const norm = raw.toLowerCase().replace(/_/g, ' ');
+    const map = this._getRegionCenters();
+
+    if (map[rawName]) return map[rawName].clone();
+    for (const key of Object.keys(map)) {
+      const kl = key.toLowerCase();
+      if (kl === norm) return map[key].clone();
+      if (norm.includes(kl) || kl.includes(norm)) return map[key].clone();
+    }
+
+    const rules = [
+      { re: /temporal|heschl|sts|transverse|s temporal|g temp| planum|mtg|stg|itg|fusiform|parahipp|hippoc|entorh|pole/, v: [0.72, -0.38, 0.12] },
+      { re: /frontal|prefront|broca|pars|operc|orbitofront|olfactory|precentral|motor|supplement|sma|front/, v: [0.12, 0.42, -0.72] },
+      { re: /occipital|calcar|lingual|cuneus|v1|v2|v3|visual|striate|extrastriate/, v: [0.05, 0.08, 0.88] },
+      { re: /parietal|angular|supramarg|postcentral|somato|intrapariet|precuneus|sup par/, v: [-0.55, 0.48, 0.42] },
+      { re: /cingul|cingulate|callos|medial.*wall/, v: [0.0, 0.22, -0.28] },
+      { re: /insula|insular|claustrum/, v: [0.68, 0.05, -0.18] },
+      { re: /amygdal|accumb|basal|striatum|pallid|putamen|thalamus|hypothal/, v: [0.52, -0.32, -0.15] },
+      { re: /cerebell/, v: [0.0, -0.85, 0.65] },
+      { re: /wernicke|language|comprehen/, v: [-0.68, 0.05, 0.28] },
+    ];
+
+    for (const { re, v } of rules) {
+      if (re.test(norm)) return new THREE.Vector3(v[0], v[1], v[2]);
+    }
+
+    let h = 2166136261;
+    for (let i = 0; i < raw.length; i++) {
+      h ^= raw.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const u = ((h >>> 0) % 10000) / 10000;
+    const v2 = (((h >>> 16) % 10000) / 10000);
+    const theta = u * Math.PI * 2;
+    const phi = Math.acos(2 * v2 - 1);
+    const sinP = Math.sin(phi);
+    return new THREE.Vector3(
+      0.88 * sinP * Math.cos(theta),
+      0.88 * Math.cos(phi) * 0.85,
+      0.88 * sinP * Math.sin(theta),
+    );
   }
 
   _activationToColor(value, highlighted) {
@@ -233,16 +377,19 @@ class MindmapBrainWidget {
   }
 
   highlightRegion(index) {
+    if (this.disposed) return;
     this.highlightedRegion = index;
     this._paintActivations();
   }
 
   clearHighlight() {
+    if (this.disposed) return;
     this.highlightedRegion = null;
     this._paintActivations();
   }
 
   setShimmerMode(enabled) {
+    if (this.disposed) return;
     this.shimmerMode = enabled;
     if (!enabled) {
       this._paintActivations();
@@ -252,7 +399,7 @@ class MindmapBrainWidget {
   _animate() {
     if (this.disposed) return;
 
-    if (this.brainGroup) {
+    if (this.brainGroup && !this._isDragging) {
       this.brainGroup.rotation.y += 0.003;
     }
 
@@ -280,6 +427,15 @@ class MindmapBrainWidget {
   dispose() {
     this.disposed = true;
     cancelAnimationFrame(this._animationId);
+    if (this.renderer && this._onPointerDown) {
+      const el = this.renderer.domElement;
+      el.removeEventListener('pointerdown', this._onPointerDown);
+      el.removeEventListener('pointermove', this._onPointerMove);
+      el.removeEventListener('pointerup', this._onPointerUp);
+      el.removeEventListener('pointercancel', this._onPointerUp);
+      el.removeEventListener('lostpointercapture', this._onPointerUp);
+      el.removeEventListener('wheel', this._onWheel, this._wheelOpts);
+    }
     if (this.renderer) {
       this.renderer.dispose();
       if (this.renderer.domElement.parentNode) {

@@ -16,3 +16,6 @@ dist/
 build/
 .pytest_cache/
 backend/.venv/
+
+# Modal / personal backend URL for the extension (see extension/background/config.example.js)
+extension/background/config.local.js

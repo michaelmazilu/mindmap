@@ -42,7 +42,7 @@ git clone https://github.com/michaelmazilu/mindmap.git && cd mindmap
 
 ### 2. Backend (default)
 
-The extension ships with a default Modal API URL in `extension/background/service-worker.js` (`HOSTED_ENDPOINT`). After `modal deploy`, confirm that URL matches the **HTTPS endpoint** Modal prints (it ends in `.modal.run`, not `modal.com/apps/...`).
+After `modal deploy`, copy `extension/background/config.example.js` to `config.local.js` (gitignored) and paste your **HTTPS** endpoint (ends in `.modal.run`, not `modal.com/apps/...`). Or set the URL under **Overrides** in the extension popup.
 
 Optional: open the extension popup → **Overrides** to set another backend URL or a Claude API key for direct calls.
 
@@ -68,7 +68,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 modal deploy modal_app.py
 ```
 
-Then set the backend URL under **Overrides** in the extension popup (or change `HOSTED_ENDPOINT` in the service worker).
+Then set the backend URL in `extension/background/config.local.js` or under **Overrides** in the popup.
 
 ## Architecture
 

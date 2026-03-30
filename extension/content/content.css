@@ -10,7 +10,7 @@
 }
 
 .mindmap-panel.expanded {
-  max-height: 260px;
+  max-height: 380px;
   opacity: 1;
 }
 
@@ -145,6 +145,57 @@
   color: rgba(180, 180, 180, 0.8);
   min-width: 30px;
   text-align: right;
+}
+
+.mindmap-emotion {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 4px;
+}
+
+.mindmap-emotion-label {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 100, 20, 0.75);
+}
+
+.mindmap-emotion-value {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(235, 235, 240, 0.95);
+  line-height: 1.35;
+}
+
+.mindmap-loading .mindmap-emotion-value {
+  color: rgba(80, 80, 85, 0.5);
+}
+
+.mindmap-ragebait {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: clamp(17px, 2.6vw, 22px);
+  font-weight: 800;
+  font-style: normal;
+  color: #ff1744;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 12px 0 6px;
+  margin: 4px -4px 0;
+  text-shadow:
+    0 0 20px rgba(255, 23, 68, 0.65),
+    0 0 40px rgba(255, 23, 68, 0.35),
+    0 2px 0 rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 23, 68, 0.45);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255, 23, 68, 0.12) 0%, rgba(255, 23, 68, 0.02) 100%);
+  text-align: center;
 }
 
 .mindmap-interpretation {
